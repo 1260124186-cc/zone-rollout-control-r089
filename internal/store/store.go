@@ -19,68 +19,36 @@ type Store struct {
 	state domain.State
 }
 
-// OpenOptions controls how an existing snapshot is treated while the store is
-// being opened.
-type OpenOptions struct {
-	RepairDamaged bool
-}
-
+// Open loads the snapshot at path. A new, empty state is initialized only when
+// the snapshot file does not exist. When the file exists but cannot be parsed
+// completely and validated, Open returns an error without creating, removing,
+// renaming or overwriting any file, so the damaged snapshot is preserved for
+// manual recovery. Leftover temporary files from an interrupted replacement are
+// never treated as state.
 func Open(path string) (*Store, error) {
-	return OpenWithOptions(path, OpenOptions{RepairDamaged: true})
-}
-
-func OpenWithOptions(path string, options OpenOptions) (*Store, error) {
 	if path == "" {
 		return nil, errors.New("snapshot path is required")
 	}
-	state := blankState()
 	payload, err := os.ReadFile(path)
 	switch {
 	case err == nil:
-		decoded, decodeErr := decodeSnapshot(payload)
-		if decodeErr == nil {
-			state = decoded
-			break
+		state, decodeErr := decodeSnapshot(payload)
+		if decodeErr != nil {
+			return nil, fmt.Errorf("load snapshot %s: %w", path, decodeErr)
 		}
-		if !options.RepairDamaged {
-			return nil, fmt.Errorf("decode snapshot: %w", decodeErr)
-		}
-		recovered, ok := recoverState(payload)
-		if !ok {
-			return nil, fmt.Errorf("decode snapshot: %w", decodeErr)
-		}
-		if err := replaceFile(path, recovered); err != nil {
-			return nil, fmt.Errorf("repair snapshot: %w", err)
-		}
-		state = recovered
+		return &Store{path: path, state: state}, nil
 	case errors.Is(err, os.ErrNotExist):
-		pending, found, adoptErr := adoptPendingSnapshot(path)
-		if adoptErr != nil {
-			return nil, fmt.Errorf("inspect pending snapshot: %w", adoptErr)
-		}
-		if found {
-			decoded, decodeErr := decodeSnapshot(pending)
-			if decodeErr != nil {
-				return nil, fmt.Errorf("decode pending snapshot: %w", decodeErr)
-			}
-			state = decoded
-			break
-		}
+		// Only a genuinely missing snapshot may start from a blank state.
+		// Persist it through the same atomic path used by transactions so the
+		// directory never holds an informal half-written initial file.
+		state := blankState()
 		if err := replaceFile(path, state); err != nil {
 			return nil, fmt.Errorf("initialize snapshot: %w", err)
 		}
+		return &Store{path: path, state: state}, nil
 	default:
 		return nil, fmt.Errorf("read snapshot: %w", err)
 	}
-	return &Store{path: path, state: state}, nil
-}
-
-func decodeSnapshot(payload []byte) (domain.State, error) {
-	var state domain.State
-	if err := json.Unmarshal(payload, &state); err != nil {
-		return domain.State{}, err
-	}
-	return normalize(state), nil
 }
 
 func (s *Store) Path() string {

@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
-	"time"
 )
 
+// replaceFile writes value atomically: a fresh uniquely named pending file is
+// fully written, fsynced and closed before it replaces the snapshot with
+// rename(2). If any step fails the pending file is removed and the existing
+// snapshot is left byte-for-byte untouched. Pending files from a process that
+// crashed during replacement are leftovers only; Open never reads them.
 func replaceFile(path string, value any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return fmt.Errorf("create snapshot directory: %w", err)
@@ -54,55 +56,4 @@ func replaceFile(path string, value any) error {
 		_ = directory.Close()
 	}
 	return nil
-}
-
-// pendingSnapshotCandidates lists leftover intermediate snapshot files that an
-// interrupted replacement may have produced, newest first.
-func pendingSnapshotCandidates(path string) []string {
-	directory := filepath.Dir(path)
-	prefix := "." + filepath.Base(path) + ".pending-"
-	entries, err := os.ReadDir(directory)
-	if err != nil {
-		return nil
-	}
-	names := make([]string, 0, len(entries))
-	modified := make(map[string]time.Time, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasPrefix(entry.Name(), prefix) {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		names = append(names, entry.Name())
-		modified[entry.Name()] = info.ModTime()
-	}
-	sort.Slice(names, func(i, j int) bool {
-		left := modified[names[i]]
-		right := modified[names[j]]
-		if !left.Equal(right) {
-			return left.After(right)
-		}
-		return names[i] > names[j]
-	})
-	paths := make([]string, 0, len(names))
-	for _, name := range names {
-		paths = append(paths, filepath.Join(directory, name))
-	}
-	return paths
-}
-
-// adoptPendingSnapshot treats a leftover intermediate snapshot as the source of
-// truth when the primary snapshot file is missing, so a deployment that
-// restarted during a replacement keeps reading its most recent bytes.
-func adoptPendingSnapshot(path string) ([]byte, bool, error) {
-	for _, candidate := range pendingSnapshotCandidates(path) {
-		payload, err := os.ReadFile(candidate)
-		if err != nil {
-			continue
-		}
-		return payload, true, nil
-	}
-	return nil, false, nil
 }

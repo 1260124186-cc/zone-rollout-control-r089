@@ -34,12 +34,10 @@ func run() error {
 		address        string
 		snapshotPath   string
 		shutdownWindow time.Duration
-		repairSnapshot bool
 	)
 	flag.StringVar(&address, "addr", "127.0.0.1:8090", "HTTP listen address")
 	flag.StringVar(&snapshotPath, "state", "data/zrc-state.json", "state snapshot path")
 	flag.DurationVar(&shutdownWindow, "shutdown-timeout", 10*time.Second, "graceful shutdown window")
-	flag.BoolVar(&repairSnapshot, "snapshot-repair", true, "rebuild an unreadable snapshot in place")
 	flag.Parse()
 	if shutdownWindow <= 0 {
 		return errors.New("shutdown-timeout must be positive")
@@ -52,14 +50,7 @@ func run() error {
 	}
 	defer lock.Unlock()
 
-	if repairSnapshot {
-		logger.Warn("snapshot repair is enabled; an unreadable snapshot will be rebuilt in place",
-			"state_path", snapshotPath,
-		)
-	}
-	stateStore, err := store.OpenWithOptions(snapshotPath, store.OpenOptions{
-		RepairDamaged: repairSnapshot,
-	})
+	stateStore, err := store.Open(snapshotPath)
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}

@@ -1,11 +1,6 @@
 package store
 
-import (
-	"bytes"
-	"encoding/json"
-
-	"solo-0014-zone-rollout-control/internal/domain"
-)
+import "solo-0014-zone-rollout-control/internal/domain"
 
 const schemaVersion = 1
 
@@ -48,47 +43,4 @@ func normalize(state domain.State) domain.State {
 		state.AuditEvents = []domain.AuditEvent{}
 	}
 	return state
-}
-
-// recoverState performs a best-effort decode of a snapshot payload that failed
-// strict decoding. It keeps every complete top-level member it can read and
-// ignores the remainder, so a partially written snapshot still yields a usable
-// state instead of blocking startup.
-func recoverState(payload []byte) (domain.State, bool) {
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	token, err := decoder.Token()
-	if err != nil {
-		return domain.State{}, false
-	}
-	if delimiter, ok := token.(json.Delim); !ok || delimiter != '{' {
-		return domain.State{}, false
-	}
-	raw := make(map[string]json.RawMessage)
-	for decoder.More() {
-		keyToken, err := decoder.Token()
-		if err != nil {
-			break
-		}
-		key, ok := keyToken.(string)
-		if !ok {
-			break
-		}
-		var value json.RawMessage
-		if err := decoder.Decode(&value); err != nil {
-			break
-		}
-		raw[key] = value
-	}
-	if len(raw) == 0 {
-		return domain.State{}, false
-	}
-	encoded, err := json.Marshal(raw)
-	if err != nil {
-		return domain.State{}, false
-	}
-	var state domain.State
-	if err := json.Unmarshal(encoded, &state); err != nil {
-		return domain.State{}, false
-	}
-	return normalize(state), true
 }
