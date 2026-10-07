@@ -36,38 +36,55 @@ func newHarness() (*harness, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create temporary directory: %w", err)
 	}
-	stateStore, err := store.Open(tempDir + "/state.json")
-	if err != nil {
-		_ = os.RemoveAll(tempDir)
-		return nil, fmt.Errorf("open temporary store: %w", err)
+	h := &harness{
+		clock:   platform.NewManualClock(time.Date(2026, time.September, 25, 12, 0, 0, 0, time.UTC)),
+		client:  &http.Client{Timeout: 10 * time.Second},
+		tempDir: tempDir,
 	}
-	clock := platform.NewManualClock(time.Date(2026, time.September, 25, 12, 0, 0, 0, time.UTC))
+	if err := h.restart(); err != nil {
+		_ = os.RemoveAll(tempDir)
+		return nil, err
+	}
+	return h, nil
+}
+
+// restart shuts down the current server when one is running, reopens the store
+// from the snapshot file and serves a fresh API instance, mimicking a full
+// process restart against the same state directory.
+func (h *harness) restart() error {
+	if h.server != nil {
+		// Shutdown also closes the listener.
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := h.server.Shutdown(ctx); err != nil {
+			return fmt.Errorf("shutdown server: %w", err)
+		}
+	}
+	stateStore, err := store.Open(h.tempDir + "/state.json")
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
 	ids := platform.CryptoIDGenerator{}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	plans := plan.New(stateStore, clock, ids)
-	nodes := fleet.New(stateStore, clock, ids)
-	allocations := allocation.New(stateStore, clock, ids)
-	probes := probe.New(stateStore, clock, ids, allocations)
-	assessments := assessment.New(stateStore, clock, ids)
+	plans := plan.New(stateStore, h.clock, ids)
+	nodes := fleet.New(stateStore, h.clock, ids)
+	allocations := allocation.New(stateStore, h.clock, ids)
+	probes := probe.New(stateStore, h.clock, ids, allocations)
+	assessments := assessment.New(stateStore, h.clock, ids)
 	api := httpapi.New(plans, nodes, allocations, probes, assessments, ids, logger)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		_ = os.RemoveAll(tempDir)
-		return nil, fmt.Errorf("listen: %w", err)
+		return fmt.Errorf("listen: %w", err)
 	}
 	server := &http.Server{Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		_ = server.Serve(listener)
 	}()
-	return &harness{
-		baseURL:  "http://" + listener.Addr().String(),
-		clock:    clock,
-		client:   &http.Client{Timeout: 10 * time.Second},
-		server:   server,
-		listener: listener,
-		tempDir:  tempDir,
-	}, nil
+	h.baseURL = "http://" + listener.Addr().String()
+	h.server = server
+	h.listener = listener
+	return nil
 }
 
 func (h *harness) close() {

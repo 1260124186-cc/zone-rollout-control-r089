@@ -5,9 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
-	"time"
 )
 
 func replaceFile(path string, value any) error {
@@ -54,55 +51,4 @@ func replaceFile(path string, value any) error {
 		_ = directory.Close()
 	}
 	return nil
-}
-
-// pendingSnapshotCandidates lists leftover intermediate snapshot files that an
-// interrupted replacement may have produced, newest first.
-func pendingSnapshotCandidates(path string) []string {
-	directory := filepath.Dir(path)
-	prefix := "." + filepath.Base(path) + ".pending-"
-	entries, err := os.ReadDir(directory)
-	if err != nil {
-		return nil
-	}
-	names := make([]string, 0, len(entries))
-	modified := make(map[string]time.Time, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasPrefix(entry.Name(), prefix) {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		names = append(names, entry.Name())
-		modified[entry.Name()] = info.ModTime()
-	}
-	sort.Slice(names, func(i, j int) bool {
-		left := modified[names[i]]
-		right := modified[names[j]]
-		if !left.Equal(right) {
-			return left.After(right)
-		}
-		return names[i] > names[j]
-	})
-	paths := make([]string, 0, len(names))
-	for _, name := range names {
-		paths = append(paths, filepath.Join(directory, name))
-	}
-	return paths
-}
-
-// adoptPendingSnapshot treats a leftover intermediate snapshot as the source of
-// truth when the primary snapshot file is missing, so a deployment that
-// restarted during a replacement keeps reading its most recent bytes.
-func adoptPendingSnapshot(path string) ([]byte, bool, error) {
-	for _, candidate := range pendingSnapshotCandidates(path) {
-		payload, err := os.ReadFile(candidate)
-		if err != nil {
-			continue
-		}
-		return payload, true, nil
-	}
-	return nil, false, nil
 }

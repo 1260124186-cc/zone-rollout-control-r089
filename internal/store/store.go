@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,17 +20,13 @@ type Store struct {
 	state domain.State
 }
 
-// OpenOptions controls how an existing snapshot is treated while the store is
-// being opened.
-type OpenOptions struct {
-	RepairDamaged bool
-}
-
+// Open loads the snapshot at path. A missing file is the only case that
+// initializes a blank state, written atomically. An existing file that cannot
+// be decoded completely is reported as an error and left byte-for-byte
+// untouched, so the process fails before any write can reach it and the file
+// stays available for manual recovery. Leftover intermediate files from
+// interrupted replacements are never treated as valid state.
 func Open(path string) (*Store, error) {
-	return OpenWithOptions(path, OpenOptions{RepairDamaged: true})
-}
-
-func OpenWithOptions(path string, options OpenOptions) (*Store, error) {
 	if path == "" {
 		return nil, errors.New("snapshot path is required")
 	}
@@ -38,34 +35,11 @@ func OpenWithOptions(path string, options OpenOptions) (*Store, error) {
 	switch {
 	case err == nil:
 		decoded, decodeErr := decodeSnapshot(payload)
-		if decodeErr == nil {
-			state = decoded
-			break
+		if decodeErr != nil {
+			return nil, fmt.Errorf("decode snapshot %s (file left untouched for manual recovery): %w", path, decodeErr)
 		}
-		if !options.RepairDamaged {
-			return nil, fmt.Errorf("decode snapshot: %w", decodeErr)
-		}
-		recovered, ok := recoverState(payload)
-		if !ok {
-			return nil, fmt.Errorf("decode snapshot: %w", decodeErr)
-		}
-		if err := replaceFile(path, recovered); err != nil {
-			return nil, fmt.Errorf("repair snapshot: %w", err)
-		}
-		state = recovered
+		state = decoded
 	case errors.Is(err, os.ErrNotExist):
-		pending, found, adoptErr := adoptPendingSnapshot(path)
-		if adoptErr != nil {
-			return nil, fmt.Errorf("inspect pending snapshot: %w", adoptErr)
-		}
-		if found {
-			decoded, decodeErr := decodeSnapshot(pending)
-			if decodeErr != nil {
-				return nil, fmt.Errorf("decode pending snapshot: %w", decodeErr)
-			}
-			state = decoded
-			break
-		}
 		if err := replaceFile(path, state); err != nil {
 			return nil, fmt.Errorf("initialize snapshot: %w", err)
 		}
@@ -75,10 +49,21 @@ func OpenWithOptions(path string, options OpenOptions) (*Store, error) {
 	return &Store{path: path, state: state}, nil
 }
 
+// decodeSnapshot strictly decodes a snapshot payload. The document must be a
+// single JSON object with a schema version the service recognizes; older
+// structures decode deterministically through normalize, while anything
+// unrecognized fails instead of being partially salvaged.
 func decodeSnapshot(payload []byte) (domain.State, error) {
+	trimmed := bytes.TrimSpace(payload)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return domain.State{}, errors.New("snapshot is not a JSON object")
+	}
 	var state domain.State
-	if err := json.Unmarshal(payload, &state); err != nil {
+	if err := json.Unmarshal(trimmed, &state); err != nil {
 		return domain.State{}, err
+	}
+	if state.SchemaVersion > schemaVersion {
+		return domain.State{}, fmt.Errorf("schema version %d is newer than supported version %d", state.SchemaVersion, schemaVersion)
 	}
 	return normalize(state), nil
 }
